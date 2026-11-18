@@ -276,6 +276,7 @@ the bundled AROS ROM."
     (let ((elf2hunk (expand-file-name "elf2hunk" (copperline--toolchain-dir))))
       (when (file-exists-p elf2hunk) (set-file-modes elf2hunk #o755))))))
 
+;;;###autoload
 (defun copperline-setup ()
   "Put the installed toolchain and CLI on `exec-path' and in `process-environment'.
 Also registers the dape configuration.  `copperline-install' calls this;
@@ -304,6 +305,7 @@ call it again after changing `copperline-cache-dir' or `copperline-machine'."
         (add-hook 'dape-stopped-hook #'copperline--prime))
       (message "copperline: ready -- `M-x copperline-run' in a C buffer"))))
 
+;;;###autoload
 (defun copperline-install (&optional force)
   "Download Copperline and the Bartman m68k toolchain into `copperline-cache-dir'.
 With a prefix argument FORCE, refetch what is already there.  A locally
@@ -346,6 +348,7 @@ result and for the two DWARF gotchas."
                                            (car (last found))))
       (read-file-name "Amiga hunk executable: " nil nil t))))
 
+;;;###autoload
 (defun copperline-run (program)
   "Debug hunk executable PROGRAM in Copperline through dape.
 PROGRAM defaults to the newest `*.exe' under the project.  Its sibling
@@ -389,6 +392,7 @@ guest reports at LoadSeg; until that happens line breakpoints report
                           (ignore-errors (dape--breakpoint-notify-all))))
         (error nil)))))
 
+;;;###autoload
 (defun copperline-profile (frames)
   "Sample the stopped Copperline session for FRAMES into a .cpuprofile.
 The adapter derives a call-frame unwind table from the program's DWARF,
