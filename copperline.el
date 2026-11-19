@@ -174,16 +174,23 @@ from its own CMake cache."
 
 (defconst copperline--dap-config
   '(copperline
-    :major-modes (c-mode c-mode-common c++-mode)
-    :types ("copperline")
+    :name "copperline"
+    ;; Deliberately no :major-modes or :types: dape forwards every keyword key
+    ;; of the config to the adapter as a launch argument, and turns their
+    ;; symbol lists into null on the way, which Copperline has no use for.
     :type "copperline"
     :request "launch"
     :entryPoint "main"
     :stopOnEntry t
     :headless t
     :noAudio t
-    :factory t)
-  "Template dape config; `copperline-run' fills the per-program keys.")
+    :factory t
+    ;; `command' and `command-args' are dape's own, symbol-keyed, properties:
+    ;; it strips every non-keyword key before sending the launch request, so
+    ;; these say how to start the adapter without reaching Copperline as
+    ;; launch arguments.  `copperline-debug' fills in the absolute path.
+    command-args ("--dap"))
+  "Template dape config; `copperline-debug' fills the per-program keys.")
 
 (defun copperline--toolchain-dir () (expand-file-name "toolchain" copperline-cache-dir))
 (defun copperline--tools-dir () (expand-file-name "tools" copperline-cache-dir))
@@ -525,13 +532,13 @@ program without a debugger."
          (elf (concat (file-name-sans-extension program) ".elf"))
          (elf (and (file-exists-p elf) (file-truename elf)))
          (config (cdr (assq 'copperline dape-configs))))
-    (plist-put config :command (copperline-ctl))
-    (plist-put config :command-args (list "--dap"))
-    ;; Absolute: outside `copperline-mode' nothing has the emulator on PATH.
+    ;; Absolute: outside `copperline-mode' nothing has the adapter or the
+    ;; emulator on PATH.
+    (plist-put config (quote command) (copperline-ctl))
     (plist-put config :copperline (or (copperline-emulator) :null))
     (plist-put config :program program)
     (plist-put config :symbolFile (or elf :null))
-    (dape "copperline")
+    (dape (copy-sequence config))
     (message "copperline: booting %s%s"
              (file-name-nondirectory program)
              (if elf " (DWARF sibling found)"
