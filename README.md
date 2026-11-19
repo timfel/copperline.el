@@ -15,31 +15,41 @@ dape configuration.
 ```elisp
 (use-package copperline
   :vc (:url "https://github.com/timfel/copperline.el" :branch "main" :rev :newest)
-  :commands (copperline-install copperline-setup copperline-run copperline-profile))
+  :commands (copperline-install copperline-mode copperline-run copperline-profile)
+  :hook ((c-mode-local-vars-hook c++-mode-local-vars-hook) . copperline-mode))
 ```
+
+(That hook is the polite way to get `copperline-mode' in C buffers without
+it following you into non-Amiga projects; drop it and turn the mode on per
+project instead if you prefer.)
 
 ## Use
 
     M-x copperline-install    ; once, about 200 MB
+    M-x copperline-mode       ; per project: M-x compile now builds it
     M-x copperline-run        ; in a C buffer; offers the newest *.exe
 
+`copperline-mode' is the build half, and it never touches your Emacs
+environment: it sets `compile-command' and `compilation-environment'
+buffer-locally from the project's `CMakeCache.txt`, which is where the VS
+Code cmake kits get the same values from - the toolchain tree, the
+`TOOLCHAIN_PREFIX`, and `<tree>/opt/bin` plus `<tree>` plus
+`<tree>/opt/<prefix>/bin` on `PATH`:
+
+```
+cmake --build /path/to/project/build     # already configured
+cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=deps/.../m68k-bartman.cmake ...
+                                         # not configured yet
+```
+
+The configure form comes from `copperline-cmake-kit` (`:cpu`, `:prefix`,
+`:build-type`). Nothing is exported to `exec-path` or `process-environment`,
+so nothing leaks into shells, eshell or other buffers.
 Source breakpoints, stepping, typed locals, a call stack through ACE's own
 sources, the 68k registers, and a Chipset scope of custom registers, all in
 dape's ordinary UI (`C-x X a c` continue, `C-x X a n` step, `C-x X a q`
 quit). Booting the bundled AROS ROM takes ~30 s - that is the guest, not a
 hang. Remove `:headless` from `copperline--dap-config` to see the emulator.
-
-Build with the toolchain package's `m68k-bartman.cmake`:
-
-```sh
-cmake -S . -B build -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=deps/AmigaCMakeCrossToolchains/m68k-bartman.cmake \
-  -DTOOLCHAIN_PREFIX=m68k-amiga-elf \
-  -DTOOLCHAIN_PATH=~/.emacs.d/.cache/copperline/toolchain/opt \
-  -DM68K_CPU=68000 -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-cmake --build build
-```
 
 Three things to remember:
 
@@ -50,6 +60,9 @@ Three things to remember:
    `copperline-run` does). Without it you get symbols but no lines or locals.
 3. Line breakpoints bind once the session's loaded sources have been
    fetched; `copperline--prime` arranges that on the first stop.
+
+The debug side is registered with dape through `with-eval-after-load`, so
+copperline.el costs nothing until dape loads and adds nothing to your init.
 
 The toolchain file adds `-flto -fwhole-program` to every build type, Debug
 included. Lines survive that; inlined locals do not, so a debug build wants

@@ -4,7 +4,7 @@
 
 ;; Author: Tim Felgentreff
 ;; URL: https://github.com/timfel/copperline.el
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, processes, convenience
 
@@ -19,7 +19,16 @@
 ;; (MELPA) is not required to install, only to debug.
 ;;
 ;;     M-x copperline-install    ; once, about 200 MB
+;;     M-x copperline-mode       ; per project: cmake build + toolchain in PATH
 ;;     M-x copperline-run        ; in a C buffer; offers the newest *.exe
+;;
+;; `copperline-mode' is the build half: it sets `compile-command' and
+;; `compilation-environment' buffer-locally from the project's CMake cache,
+;; so M-x compile configures and builds with the same toolchain environment
+;; the VS Code cmake kits use, without touching the rest of your Emacs.
+;; Add
+;;     :hook ((c-mode-local-vars-hook c++-mode-local-vars-hook) . copperline-mode)
+;; to your use-package form to get it in every C buffer.
 ;;
 ;; You get breakpoints, stepping, typed locals, a call stack through ACE's
 ;; own sources, the 68k register file and a Chipset scope full of custom
@@ -39,16 +48,17 @@
 ;; from.  With AmigaCMakeCrossToolchains' m68k-bartman.cmake and a project
 ;; that runs elf2hunk after linking (greatflight does):
 ;;
+;; `copperline-mode' generates
+;;
 ;;     cmake -S . -B build -G Ninja \
 ;;       -DCMAKE_TOOLCHAIN_FILE=deps/AmigaCMakeCrossToolchains/m68k-bartman.cmake \
 ;;       -DTOOLCHAIN_PREFIX=m68k-amiga-elf \
 ;;       -DTOOLCHAIN_PATH=~/.emacs.d/.cache/copperline/toolchain/opt \
 ;;       -DM68K_CPU=68000 -DCMAKE_BUILD_TYPE=Debug \
-;;       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-;;     cmake --build build
+;;       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ; then cmake --build build
 ;;
-;; Configure from Emacs once `copperline-setup' has run, so the cross
-;; compiler and elf2hunk are on PATH, and clangd will read
+;; for an unconfigured tree, and `cmake --build build' once it is, with the
+;; cross compiler, elf2hunk and vasmm68k_mot on PATH.  clangd then reads
 ;; build/compile_commands.json.
 ;;
 ;; Three things to remember:
@@ -102,9 +112,12 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'compile)
+(require 'project)
 (require 'subr-x)
-(require 'dape nil t)
 
+;; Dape's own, declared rather than required: see `with-eval-after-load' below.
+(defvar dape-configs)
 (declare-function dape "dape" (config &optional skip-compile))
 (declare-function dape-request "dape" (conn command arguments &optional cb))
 (declare-function dape--live-connections "dape")
@@ -144,6 +157,15 @@ Examples: (quote (:model \"A1200\" :fast \"8M\")), or add
 the bundled AROS ROM."
   :type '(plist :key-type (choice (const :model) (const :chip) (const :fast)
                                   (const :slow) (const :rom) (const :cpu))
+                :value-type string))
+
+(defcustom copperline-cmake-kit (list :cpu "68000" :prefix "m68k-amiga-elf"
+                                      :build-type "Debug")
+  "Initial cache values for a fresh configure, as the VS Code cmake kit uses them.
+Keys :cpu (an `M68K_CPU' value), :prefix (`TOOLCHAIN_PREFIX') and
+:build-type.  A project that is already configured overrides all of them
+from its own CMake cache."
+  :type '(plist :key-type (choice (const :cpu) (const :prefix) (const :build-type))
                 :value-type string))
 
 (defvar copperline--primed nil
@@ -277,55 +299,142 @@ the bundled AROS ROM."
       (when (file-exists-p elf2hunk) (set-file-modes elf2hunk #o755))))))
 
 ;;;###autoload
-(defun copperline-setup ()
-  "Put the installed toolchain and CLI on `exec-path' and in `process-environment'.
-Also registers the dape configuration.  `copperline-install' calls this;
-call it again after changing `copperline-cache-dir' or `copperline-machine'."
-  (interactive)
-  (let ((paths (list (expand-file-name "opt/bin" (copperline--toolchain-dir))
-                     (copperline--toolchain-dir)
-                     (copperline--tools-dir))))
-    (dolist (p paths)
-      (let ((p (file-truename p)))
-        (when (and (file-directory-p p) (not (member p exec-path)))
-          (add-to-list 'exec-path p)
-          (add-to-list 'process-environment
-                       (format "PATH=%s:%s" p (getenv "PATH"))))))
-    (when-let* ((emu (copperline-emulator)))
-      (setq process-environment
-            (cons (format "COPPERLINE_BIN=%s" emu)
-                  (delete (format "COPPERLINE_BIN=%s" (getenv "COPPERLINE_BIN"))
-                          process-environment))))
-    (if (not (require 'dape nil t))
-        (message "copperline: installed, but dape is unavailable so no config was added")
-      (let ((cell (assq 'copperline dape-configs))
-            (plist (append (cdr (copy-sequence copperline--dap-config))
-                           copperline-machine)))
-        (if cell (setcdr cell plist) (push (cons 'copperline plist) dape-configs))
-        (add-hook 'dape-stopped-hook #'copperline--prime))
-      (message "copperline: ready -- `M-x copperline-run' in a C buffer"))))
+(defun copperline--register-dape-config ()
+  "Add, or refresh, the `copperline' entry in `dape-configs'."
+  (let ((cell (assq 'copperline dape-configs))
+        (plist (append (cdr (copy-sequence copperline--dap-config))
+                       copperline-machine)))
+    (if cell (setcdr cell plist) (push (cons 'copperline plist) dape-configs))))
+
+;; Everything dape-facing is deferred: none of this runs unless dape loads.
+(with-eval-after-load 'dape
+  (copperline--register-dape-config)
+  (add-hook 'dape-stopped-hook #'copperline--prime))
 
 ;;;###autoload
 (defun copperline-install (&optional force)
   "Download Copperline and the Bartman m68k toolchain into `copperline-cache-dir'.
 With a prefix argument FORCE, refetch what is already there.  A locally
 installed vscode-amiga-debug extension is copied rather than downloading
-its 200 MB VSIX; see the Commentary for the CMake side of using the
-result and for the two DWARF gotchas."
+its 200 MB VSIX; see the Commentary for what to do next: enabling
+`copperline-mode' to build, and the three things to remember."
   (interactive "P")
   (make-directory copperline-cache-dir t)
   (condition-case-unless-debug err
       (progn (copperline--install-emulator force)
              (copperline--install-toolchain force)
-             (copperline-setup))
+             (message "copperline: installed in %s -- `M-x copperline-mode' builds, `M-x copperline-run' debugs"
+                      (file-truename copperline-cache-dir)))
     (error (user-error "copperline-install failed: %s" (error-message-string err)))))
+
+;;;; Building
+
+(defun copperline--project-root ()
+  "The current project root, or `default-directory'."
+  (file-truename
+   (or (when-let* ((p (project-current))) (expand-file-name (project-root p)))
+       (locate-dominating-file default-directory ".git")
+       default-directory)))
+
+(defun copperline--cache-value (build-dir key)
+  "Value of cache KEY in build directory BUILD-DIR, or nil."
+  (let ((file (expand-file-name "CMakeCache.txt" build-dir)))
+    (when (file-readable-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (when (re-search-forward
+               (format "^%s:[A-Za-z]+=\\(.+\\)$" (regexp-quote key)) nil t)
+          (substring-no-properties (match-string 1)))))))
+
+(defun copperline--build-dir ()
+  "The project's CMake build directory, or nil when it is not configured.
+Of several build directories, the most recently configured one wins."
+  (let ((root (copperline--project-root))
+        (default-directory (copperline--project-root)))
+    (and-let* ((lines (ignore-errors
+                       (process-lines "find" "." "-maxdepth" "3" "-name" "CMakeCache.txt"
+                                      "-not" "-path" "./.git/*" "-printf" "%T@\t%h\n")))
+               (hits (mapcar (lambda (l)
+                               (pcase (split-string l "\t" t)
+                                 (`(,mtime ,dir) (cons (string-to-number mtime)
+                                                       (file-truename (expand-file-name dir root))))
+                                 (_ nil)))
+                             lines))
+               (newest (car (last (sort (delq nil hits) #'<)))))
+      (cdr newest))))
+
+(defun copperline--toolchain-tree (build-dir)
+  "Root of the toolchain tree BUILD-DIR was configured against.
+That is the directory holding `opt', which also holds `elf2hunk' and the
+other host tools; the package's own install if BUILD-DIR is nil or its
+cache says nothing useful."
+  (or (and-let* ((opt (and build-dir (copperline--cache-value build-dir "TOOLCHAIN_PATH")))
+                 ((file-directory-p opt)))
+        (file-name-directory (directory-file-name opt)))
+      (copperline--toolchain-dir)))
+
+(defun copperline--compilation-environment (build-dir)
+  "Environment for building BUILD-DIR, as the VS Code cmake kit sets it.
+<tree>/opt/bin, <tree>, and <tree>/opt/<prefix>/bin in front of `PATH', plus
+`COPPERLINE_BIN' so the installed CLI tools can start the emulator."
+  (let* ((tree (copperline--toolchain-tree build-dir))
+         (prefix (or (and build-dir (copperline--cache-value build-dir "TOOLCHAIN_PREFIX"))
+                     (plist-get copperline-cmake-kit :prefix)
+                     "m68k-amiga-elf"))
+         (path (mapconcat (lambda (d) (file-truename (expand-file-name d tree)))
+                          (list "opt/bin" "." (format "opt/%s/bin" prefix))
+                          path-separator)))
+    (cons (format "PATH=%s%s%s" path path-separator (getenv "PATH"))
+          (when-let* ((emu (copperline-emulator)))
+            (list (format "COPPERLINE_BIN=%s" emu))))))
+
+(defun copperline--compile-command (build-dir)
+  "`cmake --build' for BUILD-DIR, else the kit's configure command.
+Both are absolute, so they work from any buffer of the project."
+  (let ((root (copperline--project-root)))
+    (if build-dir
+        (format "cmake --build %s" (shell-quote-argument build-dir))
+      ;; Expanded against the root: the buffer may sit anywhere in the tree.
+      (when-let* ((toolchain (car (last (file-expand-wildcards
+                                           (expand-file-name "deps/*/m68k-*.cmake" root)
+                                           t)))))
+        (format "cmake -S %s -B %s -G Ninja -DCMAKE_TOOLCHAIN_FILE=%s -DTOOLCHAIN_PREFIX=%s -DTOOLCHAIN_PATH=%s -DM68K_CPU=%s -DCMAKE_BUILD_TYPE=%s -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+                (shell-quote-argument root)
+                (shell-quote-argument (expand-file-name "build" root))
+                (shell-quote-argument toolchain)
+                (plist-get copperline-cmake-kit :prefix)
+                (shell-quote-argument (expand-file-name "opt" (copperline--toolchain-dir)))
+                (plist-get copperline-cmake-kit :cpu)
+                (plist-get copperline-cmake-kit :build-type))))))
+
+;;;###autoload
+(define-minor-mode copperline-mode
+  "Build Amiga CMake projects from Emacs with the m68k toolchain in PATH.
+Sets `compile-command' and `compilation-environment' buffer-locally: a
+`cmake --build' for the project's CMake build directory, or the configure
+command the VS Code cmake kit would use for a tree that has none (see
+`copperline-cmake-kit').  The environment comes from the project's own
+CMake cache once it is configured, so a project configured against another
+toolchain copy builds against that one.  Assumes a Ninja generator, as the
+kits do; see the Commentary for the resulting command lines."
+  :lighter " Copperline"
+  (if (not copperline-mode)
+      (progn (kill-local-variable 'compile-command)
+             (kill-local-variable 'compilation-environment))
+    (let* ((build-dir (copperline--build-dir))
+           (command (copperline--compile-command build-dir)))
+      (if (not (or build-dir command))
+          (message "copperline: no CMake cache and no deps/*/m68k-*.cmake in %s"
+                   (copperline--project-root))
+        (setq-local compilation-environment (copperline--compilation-environment build-dir))
+        (setq-local compile-command command)
+        (message "copperline: %s" command)))))
+
+;;;; Debugging
 
 (defun copperline--executables ()
   "Hunk executables under the current project, newest first."
-  (let ((root (file-truename
-               (or (when-let* ((p (project-current))) (expand-file-name (project-root p)))
-                   (locate-dominating-file default-directory ".git")
-                   default-directory))))
+  (let ((root (copperline--project-root)))
     (when-let* ((default-directory root)
                 (lines (ignore-errors
                          (process-lines "find" "." "-name" "*.exe"
@@ -356,19 +465,22 @@ PROGRAM defaults to the newest `*.exe' under the project.  Its sibling
 the adapter source lines and locals; see the Commentary for how to build
 that pair with CMake, and `copperline-machine' for the machine to boot."
   (interactive (list (copperline--read-program)))
-  (require 'dape)
+  (unless (require 'dape nil t)
+    (user-error "dape is not installed: M-x package-install RET dape RET"))
   (unless (copperline-ctl)
     (user-error "Nothing installed yet: run M-x copperline-install"))
   (unless (file-exists-p program)
     (user-error "No such program: %s" program))
   (unless (assq 'copperline dape-configs)
-    (copperline-setup))
+    (copperline--register-dape-config))
   (let* ((program (file-truename program))
          (elf (concat (file-name-sans-extension program) ".elf"))
          (elf (and (file-exists-p elf) (file-truename elf)))
          (config (cdr (assq 'copperline dape-configs))))
     (plist-put config :command (copperline-ctl))
     (plist-put config :command-args (list "--dap"))
+    ;; Absolute: outside `copperline-mode' nothing has the emulator on PATH.
+    (plist-put config :copperline (or (copperline-emulator) :null))
     (plist-put config :program program)
     (plist-put config :symbolFile (or elf :null))
     (dape "copperline")
