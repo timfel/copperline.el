@@ -298,7 +298,6 @@ from its own CMake cache."
     (let ((elf2hunk (expand-file-name "elf2hunk" (copperline--toolchain-dir))))
       (when (file-exists-p elf2hunk) (set-file-modes elf2hunk #o755))))))
 
-;;;###autoload
 (defun copperline--register-dape-config ()
   "Add, or refresh, the `copperline' entry in `dape-configs'."
   (let ((cell (assq 'copperline dape-configs))
