@@ -72,8 +72,6 @@ bundled AROS ROM."
     :request "launch"
     :entryPoint "main"
     :stopOnEntry t
-    :headless t
-    :noAudio t
     :factory t
     ;; `command' and `command-args' are dape's own symbol-keyed properties:
     ;; how to start the adapter, not launch arguments for Copperline.
@@ -233,15 +231,17 @@ Outside a project that is `default-directory'."
 ;;;###autoload
 (defun copperline (program)
   "Run hunk executable PROGRAM in the Copperline emulator, no debugger.
-PROGRAM defaults to the newest `*.exe' under the project, the emulator
-starts on `copperline-machine', and its log goes to `*copperline*'; stop
-it with `M-x list-processes'.  Returns the emulator process."
+PROGRAM defaults to the newest `*.exe' under the project and the emulator
+starts on `copperline-machine'; its log is displayed in `*copperline*',
+and the way to stop the emulator is `M-x list-processes'.  Returns the
+emulator process."
   (interactive (list (copperline--read-program "Amiga program to run: ")))
   (copperline--check-program program)
   (let ((process-connection-type nil)
         (bin (or (copperline-emulator) (executable-find "copperline"))))
     (let ((proc (apply #'start-file-process "copperline" (get-buffer-create "*copperline*")
                        bin (append (copperline--machine-args) (list "--run" program)))))
+      (display-buffer (process-buffer proc))
       (message "copperline: running %s in the emulator" (file-name-nondirectory program))
       proc)))
 

@@ -17,12 +17,13 @@
 ;;     M-x amiga-cmake-toolchain-download  ; once
 ;;     M-x amiga-cmake-add-dirlocals       ; per project
 ;;
-;; `amiga-cmake-add-dirlocals' appends a dir-local to the project's
-;; untracked `.dir-locals-2.el': it sets `compile-command' and
+;; `amiga-cmake-add-dirlocals' adds a dir-local to the project's
+;; `.dir-locals.el': it sets `compile-command' and
 ;; `compilation-environment' from the toolchain, and points Eglot's
 ;; clangd at it with `--query-driver' so clangd parses the project as
-;; m68k code without needing a .clangd file.  `M-x compile' shows the
-;; command for review.
+;; m68k code without needing a .clangd file.  The stanza references no
+;; machine-specific paths, so the file can be committed and a fresh
+;; clone is wired up as is.  `M-x compile' shows the command for review.
 ;;
 ;; elf2hunk must live beside the toolchain's `opt/': m68k-bartman.cmake
 ;; looks for ${TOOLCHAIN_PATH}/../elf2hunk.  That file adds
@@ -48,17 +49,17 @@
   '("~/.vscode/extensions/bartmanabyss.amiga-debug-*/bin/linux"
     "~/.vscode-server/extensions/bartmanabyss.amiga-debug-*/bin/linux"))
 
-(defcustom amiga-cmake-cmake-kit (list :cpu "68000" :prefix "m68k-amiga-elf"
-                                       :build-type "Debug")
-  "CMake target to configure: :cpu, :prefix, :build-type."
+(defconst amiga-cmake-toolchain-prefix "m68k-amiga-elf"
+  "Program prefix of the m68k-amiga-elf toolchain.")
+
+(defcustom amiga-cmake-cmake-kit (list :cpu "68000" :build-type "Debug")
+  "CMake target to configure: :cpu, :build-type."
   :type '(list :inline t
                (const :tag ":cpu" :cpu)
                (choice :tag "CPU"
                        (const "68000")
                        (const "68020")
                        (const "68040"))
-               (const :tag ":prefix" :prefix)
-               (string :tag "Toolchain prefix")
                (const :tag ":build-type" :build-type)
                (choice :tag "Build type"
                        (const "Debug")
@@ -73,10 +74,6 @@
   "The CMake toolchain file configuring a project."
   (expand-file-name "AmigaCMakeCrossToolchains/m68k-bartman.cmake"
                     amiga-cmake-cache-dir))
-
-(defun amiga-cmake--toolchain-prefix ()
-  "GCC program prefix, as a fresh configure would pass it."
-  (or (plist-get amiga-cmake-cmake-kit :prefix) "m68k-amiga-elf"))
 
 (defun amiga-cmake--project-root ()
   "The current project's root, as project.el finds it."
@@ -189,7 +186,7 @@ Nil until `amiga-cmake-toolchain-download' has run."
               (shell-quote-argument root)
               (shell-quote-argument build)
               (shell-quote-argument toolchain)
-              (amiga-cmake--toolchain-prefix)
+              amiga-cmake-toolchain-prefix
               (shell-quote-argument (expand-file-name "opt" (amiga-cmake--toolchain-dir)))
               (plist-get amiga-cmake-cmake-kit :cpu)
               (plist-get amiga-cmake-cmake-kit :build-type)
@@ -200,7 +197,7 @@ Nil until `amiga-cmake-toolchain-download' has run."
   "Build environment: the toolchain's bins on `PATH'."
   (let* ((tree (amiga-cmake--toolchain-dir))
          (path (mapconcat (lambda (d) (file-truename (expand-file-name d tree)))
-                          (list "opt/bin" "." (format "opt/%s/bin" (amiga-cmake--toolchain-prefix)))
+                          (list "opt/bin" "." (format "opt/%s/bin" amiga-cmake-toolchain-prefix))
                           path-separator)))
     (list (format "PATH=%s%s%s" path path-separator (getenv "PATH")))))
 
@@ -209,52 +206,68 @@ Nil until `amiga-cmake-toolchain-download' has run."
   "Eglot contact for clangd pointed at the Amiga toolchain.
 `--query-driver' lets clangd take the target triple and the cross
 compiler's own include paths from that compiler instead of parsing
-Amiga code as host code.  Plain clangd when it is not installed, which
-makes a dir-local registering this harmless in other projects."
-  (let ((gcc (expand-file-name (format "opt/bin/%s-gcc" (amiga-cmake--toolchain-prefix))
-                               (amiga-cmake--toolchain-dir))))
-    (cons "clangd" (and (file-executable-p gcc)
-                        (list (format "--query-driver=%s" gcc))))))
+Amiga code as host code.  The glob is a name allowlist, so clangd
+queries whatever driver a project's compile_commands.json names."
+  (list "clangd" (format "--query-driver=**/%s-gcc" amiga-cmake-toolchain-prefix)))
 
-(defun amiga-cmake-dirlocals-form ()
-  "The dir-local form `amiga-cmake-add-dirlocals' appends."
-  `((nil . ((eval . (progn
-                      (setq-local compile-command (amiga-cmake-compile-command))
-                      (setq-local compilation-environment
-                                  (amiga-cmake-compilation-environment))
-                      (when (boundp (quote eglot-server-programs))
-                        (setq-local eglot-server-programs
-                                    (cons (cons (quote (c-mode c-ts-mode c++-mode c++-ts-mode))
-                                                (function amiga-cmake-clangd))
-                                          (default-value (quote eglot-server-programs)))))))))))
+(defun amiga-cmake--dirlocals-stanza ()
+  "The dir-local stanza `amiga-cmake-add-dirlocals' installs."
+  (list nil
+        (cons 'eval
+              `(progn
+                 (setq-local compile-command (amiga-cmake-compile-command))
+                 (setq-local compilation-environment
+                             (amiga-cmake-compilation-environment))
+                 (when (boundp (quote eglot-server-programs))
+                   (setq-local eglot-server-programs
+                               (cons (cons (quote (c-mode c-ts-mode c++-mode c++-ts-mode))
+                                           (function amiga-cmake-clangd))
+                                     (default-value (quote eglot-server-programs)))))))))
 
-(defun amiga-cmake-dirlocals-stanza ()
-  "`amiga-cmake-dirlocals-form' as dir-local file text."
+(defun amiga-cmake--dirlocals-text (form)
+  "Print FORM as dir-local file text, restoring reading marks."
   (require 'pp)
-  (let ((s (pp-to-string (amiga-cmake-dirlocals-form))))
+  (let ((s (pp-to-string form)))
     (setq s (replace-regexp-in-string "(function " "#'" s))
     (setq s (replace-regexp-in-string "(quote " "'" s))
-    (concat (string-trim-right s) "\n")))
+    (string-trim-right s)))
 
 ;;;###autoload
 (defun amiga-cmake-add-dirlocals ()
-  "Append the Amiga CMake dir-local to the project's `.dir-locals-2.el'.
-A no-op when that file mentions `amiga-cmake-compile-command' already."
+  "Add the Amiga CMake dir-local to the project's `.dir-locals.el'.
+The stanza references no machine-specific paths, so the file can be
+committed and a fresh clone is then wired up as is.  A no-op when the
+file mentions `amiga-cmake-compile-command' already; Emacs asks once
+per project whether the `eval' is OK."
   (interactive)
-  (let ((file (expand-file-name ".dir-locals-2.el" (amiga-cmake--project-root))))
-    (cond
-     ((and (file-readable-p file)
-           (with-temp-buffer (insert-file-contents file)
-                             (progn (goto-char (point-min))
-                                    (search-forward "amiga-cmake-compile-command" nil t))))
-      (message "amiga-cmake: %s already sets it up" file))
-     (t
+  (let ((file (expand-file-name ".dir-locals.el" (amiga-cmake--project-root))))
+    (if (and (file-readable-p file)
+             (with-temp-buffer (insert-file-contents file)
+                               (progn (goto-char (point-min))
+                                      (search-forward "amiga-cmake-compile-command" nil t))))
+        (message "amiga-cmake: %s already sets it up" file)
       (with-temp-buffer
-        (when (file-exists-p file) (insert-file-contents file))
-        (unless (bolp) (insert "\n"))
-        (insert (amiga-cmake-dirlocals-stanza))
-        (write-region (point-min) (point-max) file))
-      (message "amiga-cmake: added Amiga CMake dir-locals to %s" file)))))
+        (emacs-lisp-mode) ; so sexp movement skips the header comment
+        (condition-case ()
+            ;; Make the stanza an element of the first top-level list
+            ;; (the one dir-locals reads), leaving comments and layout
+            ;; untouched.
+            (progn
+              (insert-file-contents file)
+              (goto-char (point-min))
+              (forward-sexp 1)
+              (backward-char 1)
+              (insert "\n" (amiga-cmake--dirlocals-text
+                             (amiga-cmake--dirlocals-stanza))))
+          ((end-of-buffer scan-error file-missing) ; missing, empty or comments-only
+           (erase-buffer)
+           (insert ";;; Directory Local Variables            -*- no-byte-compile: t -*-\n"
+                   ";;; For more information see (info \"(emacs) Directory Variables\")\n\n"
+                   (amiga-cmake--dirlocals-text
+                    (list (amiga-cmake--dirlocals-stanza)))
+                   "\n")))
+        (write-region (point-min) (point-max) file)
+        (message "amiga-cmake: added Amiga CMake dir-locals to %s" file)))))
 
 (provide 'amiga-cmake)
 ;;; amiga-cmake.el ends here

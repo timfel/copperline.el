@@ -22,14 +22,17 @@ Two libraries for Amiga 68k development:
 ## Use
 
     M-x amiga-cmake-toolchain-download  ; once: m68k toolchain + CMake files
-    M-x amiga-cmake-add-dirlocals       ; per project: writes .dir-locals-2.el
+    M-x amiga-cmake-add-dirlocals       ; per project: edits .dir-locals.el
     M-x copperline-download             ; once: the emulator and its CLI
     M-x copperline                      ; run the built program
     M-x copperline-debug                ; debug it under dape
     M-x copperline-profile              ; profile a stopped session
 
-In a project, `amiga-cmake-add-dirlocals` appends this stanza to the
-untracked `.dir-locals-2.el` (Emacs asks once whether the `eval` is OK):
+In a project, `amiga-cmake-add-dirlocals` adds this stanza to the
+tracked `.dir-locals.el`, merging into one that already exists. The
+stanza contains nothing machine-specific, so the file is committable:
+pushed to the repo, a fresh clone is set up as is. (Emacs asks once per
+project whether the `eval` is OK.)
 
 ```elisp
 ((nil . ((eval . (progn
