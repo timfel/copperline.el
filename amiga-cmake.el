@@ -56,7 +56,7 @@
                (choice :tag "CPU"
                        (const "68000")
                        (const "68020")
-                       (const "68030"))
+                       (const "68040"))
                (const :tag ":prefix" :prefix)
                (string :tag "Toolchain prefix")
                (const :tag ":build-type" :build-type)
