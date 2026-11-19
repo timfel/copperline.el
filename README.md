@@ -1,33 +1,35 @@
 # copperline.el
 
-Develop and debug Amiga 68k C programs - ACE, vasm, WHDLoad-style CMake
-projects - inside the [Copperline](https://github.com/CopperlineHQ/Copperline)
-emulator, with [dape](https://github.com/svaante/dape) as the Emacs
-front end.
-
-One command fetches Copperline and Bartman's `m68k-amiga-elf` toolchain
-(gcc, gdb, `elf2hunk`, `vasmm68k_mot`, `exe2adf`, Shrinkler) into
-`~/.emacs.d/.cache/copperline`, puts them on your `PATH`, and registers a
-dape configuration.
+Develop Amiga 68k programs with Emacs, CMake, [Bartman's
+toolchain](https://github.com/BartmanAbyss/vscode-amiga-debug), and
+[Copperline](https://github.com/CopperlineHQ/Copperline) emulator.
 
 ## Install
 
 ```elisp
 (use-package copperline
   :vc (:url "https://github.com/timfel/copperline.el" :branch "main" :rev :newest)
-  :commands (copperline-install copperline-mode copperline-run copperline-profile)
-  :hook ((c-mode-local-vars-hook c++-mode-local-vars-hook) . copperline-mode))
+  :commands (copperline-install copperline-mode copperline-run
+             copperline-debug copperline-profile))
 ```
-
-(That hook is the polite way to get `copperline-mode' in C buffers without
-it following you into non-Amiga projects; drop it and turn the mode on per
-project instead if you prefer.)
 
 ## Use
 
-    M-x copperline-install    ; once, about 200 MB
+    M-x copperline-install    ; once, about 300 MB; copperline-mode offers it
     M-x copperline-mode       ; per project: M-x compile now builds it
-    M-x copperline-run        ; in a C buffer; offers the newest *.exe
+    M-x copperline-run        ; run it in the emulator window, no debugger
+    M-x copperline-debug      ; run it under dape, with breakpoints and locals
+
+[dape](https://github.com/svaante/dape) (MELPA) is needed for
+`copperline-debug` alone; installing, building and running work without it.
+
+Turn `copperline-mode` on per project with a dir-local, in the untracked
+`.dir-locals-2.el` (Emacs asks once whether the `eval` is OK):
+
+```elisp
+;; ~/dev/mygame/.dir-locals-2.el
+((nil . ((eval . (copperline-mode 1)))))
+```
 
 `copperline-mode' is the build half, and it never touches your Emacs
 environment: it sets `compile-command' and `compilation-environment'
@@ -45,11 +47,13 @@ cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=deps/.../m68k-bartman.cmake 
 The configure form comes from `copperline-cmake-kit` (`:cpu`, `:prefix`,
 `:build-type`). Nothing is exported to `exec-path` or `process-environment`,
 so nothing leaks into shells, eshell or other buffers.
-Source breakpoints, stepping, typed locals, a call stack through ACE's own
-sources, the 68k registers, and a Chipset scope of custom registers, all in
-dape's ordinary UI (`C-x X a c` continue, `C-x X a n` step, `C-x X a q`
-quit). Booting the bundled AROS ROM takes ~30 s - that is the guest, not a
-hang. Remove `:headless` from `copperline--dap-config` to see the emulator.
+`copperline-debug` gives you source breakpoints, stepping, typed locals, a
+call stack through ACE's own sources, the 68k registers, and a Chipset scope
+of custom registers, all in dape's ordinary UI (`C-x X a c` continue,
+`C-x X a n` step, `C-x X a q` quit). Booting the bundled AROS ROM takes
+~30 s - that is the guest, not a hang. The debug session is headless; the
+screen and sound are `copperline-run`, which uses the same
+`copperline-machine`.
 
 Three things to remember:
 
@@ -57,7 +61,8 @@ Three things to remember:
    beside `opt/` - the toolchain file looks for `${TOOLCHAIN_PATH}/../elf2hunk`.
 2. The adapter wants DWARF at `<program>.elf`, i.e. `game.exe.elf`; for a
    `game.exe` / `game.elf` pair pass `:symbolFile` (which
-   `copperline-run` does). Without it you get symbols but no lines or locals.
+   `copperline-debug` does). Without it you get symbols but no lines or
+   locals.
 3. Line breakpoints bind once the session's loaded sources have been
    fetched; `copperline--prime` arranges that on the first stop.
 
@@ -96,11 +101,12 @@ copperline-ctl size-report build/game.exe --elf build/game.elf
 
 Copperline's own Debug workspace - Frame Analyzer, Copper and Video tabs,
 sprite and bitplane isolation, Copper stepping, beam traps - only exists in
-the emulator window, which `:headless nil` gives you.
+the emulator window, which is what `copperline-run` opens.
 
 ## Requirements
 
-Emacs 29.1+, `curl`, `tar`, `unzip`, `find`, and dape for debugging. Linux
+Emacs 29.1+, `curl`, `tar`, `unzip`, `find`, and dape for
+`copperline-debug`. Linux
 x86_64 release assets (set `copperline-architecture` elsewhere); Windows and
 macOS would need their own asset names and are untested.
 

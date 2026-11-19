@@ -4,7 +4,7 @@
 
 ;; Author: Tim Felgentreff
 ;; URL: https://github.com/timfel/copperline.el
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, processes, convenience
 
@@ -13,34 +13,33 @@
 ;;; Commentary:
 
 ;; Installs the Copperline Amiga emulator and Bartman's m68k-amiga-elf
-;; toolchain under ~/.emacs.d/.cache/copperline, puts them on your PATH,
-;; and registers a dape configuration, so an Amiga game built with CMake
-;; can be debugged from Emacs with source breakpoints and locals.  dape
-;; (MELPA) is not required to install, only to debug.
+;; toolchain under ~/.emacs.d/.cache/copperline, and builds, runs and
+;; debugs an Amiga game written in C against them.
 ;;
-;;     M-x copperline-install    ; once, about 200 MB
-;;     M-x copperline-mode       ; per project: cmake build + toolchain in PATH
-;;     M-x copperline-run        ; in a C buffer; offers the newest *.exe
+;;     M-x copperline-install    ; once, about 300 MB; copperline-mode offers it
+;;     M-x copperline-mode       ; per project: M-x compile now builds it
+;;     M-x copperline-run        ; run it in the emulator window
+;;     M-x copperline-debug      ; run it under dape, with breakpoints and locals
+;;
+;; dape (MELPA) is needed only for `copperline-debug'.  There you get
+;; breakpoints, stepping, typed locals, a call stack through ACE's own
+;; sources, the 68k register file and a Chipset scope full of custom
+;; registers; C-x X a c continues, C-x X a n steps, C-x X a q quits.
+;; Booting the bundled AROS ROM takes about 30 seconds; that is the guest
+;; booting, not a hang.
 ;;
 ;; `copperline-mode' is the build half: it sets `compile-command' and
 ;; `compilation-environment' buffer-locally from the project's CMake cache,
 ;; so M-x compile configures and builds with the same toolchain environment
 ;; the VS Code cmake kits use, without touching the rest of your Emacs.
-;; Add
-;;     :hook ((c-mode-local-vars-hook c++-mode-local-vars-hook) . copperline-mode)
-;; to your use-package form to get it in every C buffer.
+;; Enable it per project with a dir-local:
 ;;
-;; You get breakpoints, stepping, typed locals, a call stack through ACE's
-;; own sources, the 68k register file and a Chipset scope full of custom
-;; registers.  C-x X a c continues, C-x X a n steps, C-x X a q quits.
-;; Booting the bundled AROS ROM takes about 30 seconds; that is the guest
-;; booting, not a hang.
+;;     ((nil . ((eval . (copperline-mode 1)))))
 ;;
-;; Drop :headless from `copperline--dap-config' to see the emulator
-;; window.  Copperline's own Debug workspace - the Frame Analyzer, Copper
-;; and Video tabs, sprite and bitplane isolation, Copper stepping, beam
-;; traps - only exists in that window, and this package does not pretend
-;; to reproduce it inside Emacs.
+;; Copperline's own Debug workspace - the Frame Analyzer, Copper and Video
+;; tabs, sprite and bitplane isolation, Copper stepping, beam traps - is in
+;; the emulator window, which `copperline-run' gives you.  This package does
+;; not pretend to reproduce it inside Emacs.
 ;;
 ;; ** Building something the adapter can use **
 ;;
@@ -151,8 +150,10 @@
   :type 'string)
 
 (defcustom copperline-machine '(:model "A500" :chip "1M")
-  "Machine plist merged into the launch request.
-Examples: (quote (:model \"A1200\" :fast \"8M\")), or add
+  "Machine to run and debug on, used by `copperline-run' and `copperline-debug'.
+The keys are Copperline's own machine flags; an example for AGA is
+(quote (:model \"A1200\" :fast \"8M\")), and
+(:rom \"/path/KICK31.ROM\") boots Kickstart instead of the
 \\='(:rom \"/path/KICK31.ROM\") to debug against Kickstart instead of
 the bundled AROS ROM."
   :type '(plist :key-type (choice (const :model) (const :chip) (const :fast)
@@ -225,6 +226,24 @@ from its own CMake cache."
     (unless (zerop (call-process "curl" nil nil nil "-sSfL" "--retry" "2"
                                  "--output" dest url))
       (error "copperline: could not download %s" url))))
+
+(defun copperline-installed-p ()
+  "Non-nil when the emulator, its CLI and the toolchain are all installed."
+  (and (copperline-emulator)
+       (copperline-ctl)
+       (file-directory-p (expand-file-name "opt/bin" (copperline--toolchain-dir)))))
+
+(defun copperline--machine-args ()
+  "`copperline-machine' as emulator command-line arguments.
+`:rom' is Copperline's positional ROM argument, the rest of the keys are
+flags of the same name."
+  (let ((args (and-let* ((rom (plist-get copperline-machine :rom))) (list rom))))
+    (dolist (spec (list (cons :model "--model") (cons :chipset "--chipset")
+                        (cons :cpu "--cpu") (cons :chip "--chip")
+                        (cons :fast "--fast") (cons :slow "--slow")))
+      (when-let* ((value (plist-get copperline-machine (car spec))))
+        (setq args (append args (list (cdr spec) value)))))
+    args))
 
 (defun copperline--extract-tools (tarball)
   "Unpack the copperline-ctl TARBALL into `copperline--tools-dir'."
@@ -420,6 +439,11 @@ kits do; see the Commentary for the resulting command lines."
   (if (not copperline-mode)
       (progn (kill-local-variable 'compile-command)
              (kill-local-variable 'compilation-environment))
+    (when (and (not (copperline-installed-p))
+               (not noninteractive)
+               (y-or-n-p (format "Copperline and the m68k toolchain are not under %s; fetch about 300 MB now? "
+                                 (file-truename copperline-cache-dir))))
+      (copperline-install))
     (let* ((build-dir (copperline--build-dir))
            (command (copperline--compile-command build-dir)))
       (if (not (or build-dir command))
@@ -448,28 +472,53 @@ kits do; see the Commentary for the resulting command lines."
         (mapcar (lambda (hit) (expand-file-name (cdr hit) root))
                 (sort (delq nil hits) #'<))))))
 
-(defun copperline--read-program ()
-  "Completing-read over the project's hunk executables, else a file name."
+(defun copperline--read-program (prompt)
+  "Completing-read PROMPT over the project's hunk executables, else a file."
   (let ((found (copperline--executables)))
     (if found
-        (expand-file-name (completing-read "Amiga program: " found nil nil
-                                           (car (last found))))
+        (expand-file-name (completing-read prompt found nil nil (car (last found))))
       (read-file-name "Amiga hunk executable: " nil nil t))))
+
+(defun copperline--check-program (program)
+  "Error unless PROGRAM exists and Copperline is there to run it."
+  (unless (or (copperline-emulator) (executable-find "copperline"))
+    (user-error "Copperline is not installed: M-x copperline-install"))
+  (unless (file-exists-p program)
+    (user-error "No such program: %s" program)))
 
 ;;;###autoload
 (defun copperline-run (program)
+  "Run hunk executable PROGRAM in the Copperline emulator, no debugger.
+PROGRAM defaults to the newest `*.exe' under the project.  The emulator is
+started on the machine `copperline-machine' describes and warps straight
+into the program; its log goes to the `*copperline*' buffer, and the way to
+stop it is `M-x list-processes'.  For breakpoints, locals and stepping use
+`copperline-debug'.  Returns the emulator process."
+  (interactive (list (copperline--read-program "Amiga program to run: ")))
+  (copperline--check-program program)
+  (let ((process-connection-type nil)
+        (bin (or (copperline-emulator) (executable-find "copperline"))))
+    (let ((proc (apply #'start-file-process "copperline" (get-buffer-create "*copperline*")
+                       bin (append (copperline--machine-args) (list "--run" program)))))
+      (message "copperline: running %s in the emulator (stop it with M-x list-processes)"
+               (file-name-nondirectory program))
+      proc)))
+
+;;;###autoload
+(defun copperline-debug (program)
   "Debug hunk executable PROGRAM in Copperline through dape.
 PROGRAM defaults to the newest `*.exe' under the project.  Its sibling
 `<stem>.elf' is passed as `symbolFile' when present, which is what gives
 the adapter source lines and locals; see the Commentary for how to build
-that pair with CMake, and `copperline-machine' for the machine to boot."
-  (interactive (list (copperline--read-program)))
+that pair with CMake, and `copperline-machine' for the machine to boot.
+dape is needed for this command alone; `copperline-run' runs the same
+program without a debugger."
+  (interactive (list (copperline--read-program "Amiga program to debug: ")))
   (unless (require 'dape nil t)
     (user-error "dape is not installed: M-x package-install RET dape RET"))
   (unless (copperline-ctl)
     (user-error "Nothing installed yet: run M-x copperline-install"))
-  (unless (file-exists-p program)
-    (user-error "No such program: %s" program))
+  (copperline--check-program program)
   (unless (assq 'copperline dape-configs)
     (copperline--register-dape-config))
   (let* ((program (file-truename program))
@@ -512,10 +561,11 @@ profile whose `[Bus wait]' child shows time lost to chip DMA.  Programs
 whose first code hunk holds more than about 1 MB of text cannot be
 profiled (the unwind table travels in one 4 MB request)."
   (interactive "p")
-  (require 'dape)
+  (unless (require 'dape nil t)
+    (user-error "dape is not installed: M-x package-install RET dape RET"))
   (let ((conn (and (fboundp 'dape--live-connections) (car (dape--live-connections)))))
     (unless conn
-      (user-error "No live session: M-x copperline-run first, and stop it at a breakpoint"))
+      (user-error "No live session: M-x copperline-debug first, and stop it at a breakpoint"))
     (message "copperline: sampling %d frames, this takes a moment..." frames)
     (dape-request conn :copperline/profile `(:frames ,frames)
       (lambda (body error)
