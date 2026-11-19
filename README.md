@@ -1,88 +1,83 @@
 # copperline.el
 
-Develop Amiga 68k programs with Emacs, CMake, [Bartman's
-toolchain](https://github.com/BartmanAbyss/vscode-amiga-debug), and
-[Copperline](https://github.com/CopperlineHQ/Copperline) emulator.
+Two libraries for Amiga 68k development:
+
+- **amiga-cmake.el** - build C programs with CMake and [Bartman's
+  toolchain](https://github.com/BartmanAbyss/vscode-amiga-debug).
+- **copperline.el** - run and debug the result in the
+  [Copperline](https://github.com/CopperlineHQ/Copperline) emulator.
 
 ## Install
 
 ```elisp
+(use-package amiga-cmake
+  :vc (:url "https://github.com/timfel/copperline.el" :branch "main" :rev :newest)
+  :commands (amiga-cmake-toolchain-download amiga-cmake-add-dirlocals))
 (use-package copperline
   :vc (:url "https://github.com/timfel/copperline.el" :branch "main" :rev :newest)
-  :commands (copperline-install copperline-mode copperline-run
-             copperline-debug copperline-profile))
+  :commands (copperline-download copperline copperline-debug
+             copperline-profile))
 ```
 
 ## Use
 
-    M-x copperline-install    ; once, about 300 MB; copperline-mode offers it
-    M-x copperline-mode       ; per project: M-x compile now builds it
-    M-x copperline-run        ; run it in the emulator window, no debugger
-    M-x copperline-debug      ; run it under dape, with breakpoints and locals
+    M-x amiga-cmake-toolchain-download  ; once: m68k toolchain + CMake files
+    M-x amiga-cmake-add-dirlocals       ; per project: writes .dir-locals-2.el
+    M-x copperline-download             ; once: the emulator and its CLI
+    M-x copperline                      ; run the built program
+    M-x copperline-debug                ; debug it under dape
+    M-x copperline-profile              ; profile a stopped session
 
-[dape](https://github.com/svaante/dape) (MELPA) is needed for
-`copperline-debug` alone; installing, building and running work without it.
-
-Turn `copperline-mode` on per project with a dir-local, in the untracked
-`.dir-locals-2.el` (Emacs asks once whether the `eval` is OK):
+In a project, `amiga-cmake-add-dirlocals` appends this stanza to the
+untracked `.dir-locals-2.el` (Emacs asks once whether the `eval` is OK):
 
 ```elisp
-;; ~/dev/mygame/.dir-locals-2.el
-((nil . ((eval . (copperline-mode 1)))))
+((nil . ((eval . (progn
+                (setq-local compile-command (amiga-cmake-compile-command))
+                (setq-local compilation-environment
+                            (amiga-cmake-compilation-environment))
+                (when (boundp 'eglot-server-programs)
+                  (setq-local eglot-server-programs
+                              (cons (cons '(c-mode c-ts-mode c++-mode c++-ts-mode)
+                                          #'amiga-cmake-clangd)
+                                    (default-value 'eglot-server-programs))))))))
 ```
 
-`copperline-mode' is the build half, and it never touches your Emacs
-environment: it sets `compile-command' and `compilation-environment'
-buffer-locally from the project's `CMakeCache.txt`, which is where the VS
-Code cmake kits get the same values from - the toolchain tree, the
-`TOOLCHAIN_PREFIX`, and `<tree>/opt/bin` plus `<tree>` plus
-`<tree>/opt/<prefix>/bin` on `PATH`:
+`M-x compile` then configures with AmigaCMakeCrossToolchains and builds,
+showing the command for review; Eglot starts clangd with
+`--query-driver` on the cross compiler, so it parses the project as m68k
+code without a `.clangd` file. Everything is derived from
+`amiga-cmake-cmake-kit` and the packages' cache dirs under
+`~/.emacs.d/.cache`, and nothing is exported to `exec-path` or
+`process-environment`.
 
-```
-cmake --build /path/to/project/build     # already configured
-cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=deps/.../m68k-bartman.cmake ...
-                                         # not configured yet
-```
-
-The configure form comes from `copperline-cmake-kit` (`:cpu`, `:prefix`,
-`:build-type`). Nothing is exported to `exec-path` or `process-environment`,
-so nothing leaks into shells, eshell or other buffers.
-`copperline-debug` gives you source breakpoints, stepping, typed locals, a
-call stack through ACE's own sources, the 68k registers, and a Chipset scope
-of custom registers, all in dape's ordinary UI (`C-x X a c` continue,
-`C-x X a n` step, `C-x X a q` quit). Booting the bundled AROS ROM takes
-~30 s - that is the guest, not a hang. The debug session is headless; the
-screen and sound are `copperline-run`, which uses the same
+`copperline-debug` gives source breakpoints, stepping, typed locals, a
+call stack through ACE's own sources, the 68k registers and a Chipset
+scope, all in dape's UI (`C-x X a c` continue, `C-x X a n` step, `C-x X a
+q` quit). Booting the bundled AROS ROM takes ~30 s - that is the guest.
+The session is headless; the screen is `copperline`, which uses the same
 `copperline-machine`.
 
-Three things to remember:
+## Remember
 
-1. `TOOLCHAIN_PATH` names the `opt` directory, and `elf2hunk` has to sit
-   beside `opt/` - the toolchain file looks for `${TOOLCHAIN_PATH}/../elf2hunk`.
-2. The adapter wants DWARF at `<program>.elf`, i.e. `game.exe.elf`; for a
-   `game.exe` / `game.elf` pair pass `:symbolFile` (which
-   `copperline-debug` does). Without it you get symbols but no lines or
-   locals.
-3. Line breakpoints bind once the session's loaded sources have been
-   fetched; `copperline--prime` arranges that on the first stop.
-
-The debug side is registered with dape through `with-eval-after-load`, so
-copperline.el costs nothing until dape loads and adds nothing to your init.
-
-The toolchain file adds `-flto -fwhole-program` to every build type, Debug
-included. Lines survive that; inlined locals do not, so a debug build wants
-`-O0`:
-
-```sh
--DCMAKE_C_FLAGS="-g -O0 -m68000 -fomit-frame-pointer -nostdlib \
-  -fdata-sections -ffunction-sections -MP"
-```
+1. The toolchain file wants `elf2hunk` beside `opt/`:
+   `${TOOLCHAIN_PATH}/../elf2hunk`. The download places it there; a
+   hand-copied `opt/` gives a confusing ELF2HUNK-NOTFOUND.
+2. `m68k-bartman.cmake` adds `-flto -fwhole-program` to every build
+   type, Debug included. Lines survive that, inlined locals do not; a
+   debugging build wants `-DCMAKE_C_FLAGS="-g -O0 -m68000
+   -fomit-frame-pointer -nostdlib -fdata-sections -ffunction-sections
+   -MP"`.
+3. The adapter reads DWARF from `<program>.elf` next to the `.exe`
+   (`copperline-debug` passes it); without it you get symbols but no
+   lines or locals. Line breakpoints bind on the first stop, when the
+   session's loaded sources have been fetched.
 
 ## Profiling, coverage, sizes
 
-`M-x copperline-profile` samples frames from the stopped session into a
-source-mapped `.cpuprofile` with a `[Bus wait]` child for chip-DMA stalls.
-For the per-frame bus story:
+`copperline-profile` samples the stopped session into a source-mapped
+`.cpuprofile` with a `[Bus wait]` child for chip-DMA stalls. The
+per-frame bus story, coverage and static sizes are shell jobs:
 
 ```sh
 copperline-ctl --info /tmp/ccp.json profile.start \
@@ -90,24 +85,13 @@ copperline-ctl --info /tmp/ccp.json profile.start \
 copperline-ctl --info /tmp/ccp.json profile.stop
 copperline-ctl profile-report out/p --program build/game.exe \
   --elf build/game.elf --out game.cpuprofile
-```
-
-```sh
 copperline --factory --noaudio --run build/game.exe --coverage build/lcov.info
 copperline-ctl size-report build/game.exe --elf build/game.elf
 ```
 
-## Not here
-
-Copperline's own Debug workspace - Frame Analyzer, Copper and Video tabs,
-sprite and bitplane isolation, Copper stepping, beam traps - only exists in
-the emulator window, which is what `copperline-run` opens.
-
 ## Requirements
 
-Emacs 29.1+, `curl`, `tar`, `unzip`, `find`, and dape for
-`copperline-debug`. Linux
-x86_64 release assets (set `copperline-architecture` elsewhere); Windows and
-macOS would need their own asset names and are untested.
+Emacs 29.1+, `curl`, `tar`, `unzip`, `find`, and dape for the debug
+commands. x86_64 and aarch64 emulator assets; Windows and macOS untested.
 
 GPL-3.0-or-later.
